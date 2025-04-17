@@ -1,70 +1,54 @@
+import { OAuth2Client } from "google-auth-library";
 import { Request, Response, NextFunction } from "express";
 import dotenv from "dotenv";
 dotenv.config();
-import express from "express";
-import proxy from "express-http-proxy";
-import cors from "cors";
-import helmet from "helmet";
 
-const app = express();
-const PORT = process.env.PORT || 5000;
+const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
-app.use(helmet());
-app.use(cors());
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+const authMiddleware = async(req: Request, res:Response, next:NextFunction): Promise<void> => {
+  const authHeader = req.headers["authorization"];
+  const token = authHeader && authHeader.split(" ")[1];
 
-// proxy options
-const proxyOptions = {
-    proxyReqPathResolver: (req: Request) => {
-      return req.originalUrl.replace(/^\/v1/, "/api");
-    },
-    proxyErrorHandler: (
-      err: any,
-      res: Response<any, Record<string, any>>,
-      next: NextFunction
-    ) => {
-      res.status(500).json({
-        message: "Internal server error!",
-        error: err.message,
-      });
-    },
-  };
-app.use(
-  "/v1/designs",
-  proxy(process.env.DESIGN as string, {
-    ...proxyOptions,
-  })
-);
+  if (!token) {
+    res.status(401).json({
+      error: "Access denied! No Token provided",
+    });
+    return;
+  }
 
-app.use(
-  "/v1/media/upload",
-  proxy(process.env.UPLOAD as string, {
-    ...proxyOptions,
-    parseReqBody: false,
-  })
-);
+  try {
+    const ticket = await client.verifyIdToken({
+      idToken: token,
+      audience: process.env.GOOGLE_CLIENT_ID,
+    });
 
-app.use(
-  "/v1/media",
-  proxy(process.env.UPLOAD as string, {
-    ...proxyOptions,
-    parseReqBody: true,
-  })
-);
+    const payload = ticket.getPayload();
 
-app.use(
-  "/v1/subscription",
-  proxy(process.env.SUBSCRIPTION as string, {
-    ...proxyOptions,
-  })
-);
+    if (!payload) {
+        throw new Error('Failed to retrieve payload from ticket');
+      }
 
-app.listen(PORT, () => {
-  console.log(`API Gateway is running on port ${PORT}`);
-  console.log(`DESIGN Service is running on port ${process.env.DESIGN}`);
-  console.log(`UPLOAD Service is running on port ${process.env.UPLOAD}`);
-  console.log(
-    `SUBSCRIPTION Service is running on port ${process.env.SUBSCRIPTION}`
-  );
-});
+    //add user info to req.user
+    req.user = {
+        userId: payload["sub"],
+        email: payload["email"],
+        name: payload["name"],
+      };
+
+    //Add User ID to headers for downstream services
+    req.headers["x-user-id"] = payload["sub"];
+
+    //optional
+    req.headers["x-user-email"] = payload["email"];
+    req.headers["x-user-name"] = payload["name"];
+
+    next();
+  } catch (err) {
+    console.error("Token verification failed", err);
+    res.status(401).json({
+      error: "Invalid Token!",
+    });
+  }
+}
+
+export default authMiddleware;
